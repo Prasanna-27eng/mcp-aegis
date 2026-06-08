@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.env
+*.db
+*.db-shm
+*.db-wal
+~/.mcp-aegis/
+.pytest_cache/
+.ruff_cache/
+*.egg

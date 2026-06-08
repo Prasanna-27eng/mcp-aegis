@@ -1,0 +1,166 @@
+# policy_default.toml — Built-in security baseline for mcp-aegis
+#
+# Rules are evaluated in order. The first matching rule wins.
+# Within a rule, ALL matchers must match (AND logic).
+# A request matches a matcher if it matches ANY item in the list (OR logic).
+# Glob patterns are matched with fnmatch (*, ?, [seq]).
+#
+# decision values: "ALLOW" | "BLOCK" | "LOG_ONLY"
+# dry_run mode: BLOCK becomes advisory-only — the request still passes through.
+#
+# Edit this file to tighten or loosen the policy for your deployment.
+# Override per-deployment by pointing --policy at your own TOML file.
+
+[meta]
+version     = "1.0"
+description = "Conservative security baseline — blocks known high-risk patterns, logs ambiguous ones."
+
+
+# ─────────────────────────────────────────────
+# 1. SHELL EXECUTION — hard block
+#
+# Any tool that can run arbitrary shell commands is an unconditional
+# escape hatch from every other control plane. Block at the gateway.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "block_shell_execution"
+decision = "BLOCK"
+reason   = "Shell execution tools allow arbitrary code execution and bypass all downstream controls."
+tools    = [
+    "bash",
+    "shell",
+    "exec",
+    "execute_command",
+    "run_command",
+    "terminal",
+    "subprocess",
+    "*_shell",
+    "*_exec",
+    "*_bash",
+    "*_terminal",
+]
+
+
+# ─────────────────────────────────────────────
+# 2. CREDENTIAL READS — hard block
+#
+# SSH keys, AWS credentials, .env files, netrc, GPG keyrings, and
+# gcloud tokens are the primary exfiltration targets. Any resource
+# read touching these paths is blocked unconditionally.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "block_credential_reads"
+decision = "BLOCK"
+reason   = "Requested resource URI matches a known credential path. Access denied to prevent secret exfiltration."
+resource_patterns = [
+    "file:///**/.ssh/*",
+    "file:///**/.aws/*",
+    "file:///**/.env",
+    "file:///**/credentials",
+    "file:///**/.netrc",
+    "file:///**/.gnupg/*",
+    "file:///**/.config/gcloud/*",
+]
+
+
+# ─────────────────────────────────────────────
+# 3. HOME DIRECTORY CRAWL — log only
+#
+# Directory listing and file-reading tools hitting home directories
+# are often legitimate (project scaffolding, editor integration) but
+# can also be the first stage of a credential sweep. Log and review
+# rather than block to avoid false-positive disruption.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "log_home_directory_crawl"
+decision = "LOG_ONLY"
+reason   = "File access under a home directory path — logged for review. Promote to BLOCK if not expected."
+tools    = [
+    "list_directory",
+    "read_file",
+    "*_read",
+    "*_list",
+]
+resource_patterns = [
+    "~/*",
+    "/home/*/*",
+    "/Users/*/*",
+]
+
+
+# ─────────────────────────────────────────────
+# 4. NETWORK EXFILTRATION — log only
+#
+# Outbound HTTP tools are legitimate in many workflows (browsing, APIs)
+# but are the primary vector for data exfiltration. Log every call so
+# the audit trail shows what URLs the agent contacted.
+# Promote to BLOCK in air-gapped or high-sensitivity deployments.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "log_network_requests"
+decision = "LOG_ONLY"
+reason   = "Outbound network tool call logged for audit. Review destination URLs for exfiltration indicators."
+tools    = [
+    "http_request",
+    "curl",
+    "fetch",
+    "web_request",
+    "*_request",
+    "*_fetch",
+    "*_curl",
+    "*_http",
+]
+
+
+# ─────────────────────────────────────────────
+# 5. GIT CREDENTIAL EXPOSURE — log only
+#
+# .git/config and .gitconfig can contain remote URLs with embedded
+# credentials (https://user:token@host). Log access so any token
+# exposure is traceable. Promote to BLOCK if repos use token URLs.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "log_git_credential_exposure"
+decision = "LOG_ONLY"
+reason   = "Git config file may contain embedded credentials in remote URLs — access logged."
+resource_patterns = [
+    "file:///**/.git/config",
+    "file:///**/.gitconfig",
+]
+
+
+# ─────────────────────────────────────────────
+# 6. SAMPLING / LLM CALLS — log only
+#
+# sampling/createMessage means the MCP server is asking the host LLM
+# to generate text on its behalf. Always log these: they can leak
+# context, consume quota, or be used for prompt injection.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "log_sampling_calls"
+decision = "LOG_ONLY"
+reason   = "LLM sampling call logged — review prompt content for data leakage or injection attempts."
+methods  = ["sampling/createMessage"]
+
+
+# ─────────────────────────────────────────────
+# 7. DATABASE WRITES — log only
+#
+# Destructive SQL operations (INSERT, DELETE, DROP, TRUNCATE) and
+# generic query tools can cause irreversible data loss. Log all
+# write-path tool calls. Promote to BLOCK in read-only contexts.
+# ─────────────────────────────────────────────
+[[rules]]
+name     = "log_database_writes"
+decision = "LOG_ONLY"
+reason   = "Potentially destructive database operation logged — verify the agent has write authorisation."
+methods  = ["tools/call"]
+tools    = [
+    "*_write",
+    "*_insert",
+    "*_delete",
+    "*_drop",
+    "*_truncate",
+    "execute_sql",
+    "query",
+]
