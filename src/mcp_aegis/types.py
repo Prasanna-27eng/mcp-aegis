@@ -8,9 +8,10 @@ from typing import Any
 
 
 class Decision(str, Enum):
-    ALLOW    = "ALLOW"
-    BLOCK    = "BLOCK"
-    LOG_ONLY = "LOG_ONLY"
+    ALLOW            = "ALLOW"
+    BLOCK            = "BLOCK"
+    LOG_ONLY         = "LOG_ONLY"
+    REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
 
 
 @dataclass

@@ -12,8 +12,22 @@
 # Override per-deployment by pointing --policy at your own TOML file.
 
 [meta]
-version     = "1.0"
+version     = "2.0"
 description = "Conservative security baseline — blocks known high-risk patterns, logs ambiguous ones."
+
+# decision values: "ALLOW" | "BLOCK" | "LOG_ONLY" | "REQUIRE_APPROVAL"
+#
+# REQUIRE_APPROVAL: blocks the call and adds it to the pending queue.
+# Run `mcp-aegis pending` to review. Approve with `mcp-aegis approve <id>`.
+# In --dry-run mode REQUIRE_APPROVAL is treated as LOG_ONLY (passes through).
+#
+# Example — uncomment to route prod DB writes through the approval queue:
+#
+# [[rules]]
+# name     = "require_approval_db_writes"
+# decision = "REQUIRE_APPROVAL"
+# reason   = "Production database write — human approval required."
+# tools    = ["execute_sql", "*_write", "*_delete", "*_drop"]
 
 
 # ─────────────────────────────────────────────

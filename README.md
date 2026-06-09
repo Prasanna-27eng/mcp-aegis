@@ -6,6 +6,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> **v0.2** — stdio transport, `REQUIRE_APPROVAL` decision, AegisTrace native integration
+
 ---
 
 ## The problem
@@ -158,25 +160,94 @@ That's the data you need to tune your policy before enabling enforcement.
 
 ---
 
+## stdio transport (v0.2)
+
+Connect mcp-aegis directly to Claude Desktop or any agent that uses the MCP stdio protocol:
+
+```bash
+# HTTP upstream (MCP server already running over HTTP)
+mcp-aegis serve --transport stdio --upstream http://localhost:3000
+
+# Subprocess upstream (MCP server spawned as a child process)
+mcp-aegis serve --transport stdio --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /Users/you/Documents"
+```
+
+Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "filesystem-guarded": {
+      "command": "mcp-aegis",
+      "args": [
+        "serve",
+        "--transport", "stdio",
+        "--upstream-cmd", "npx -y @modelcontextprotocol/server-filesystem /Users/you/Documents"
+      ]
+    }
+  }
+}
+```
+
+---
+
+## REQUIRE_APPROVAL (v0.2)
+
+A new policy decision that pauses a tool call and queues it for human review:
+
+```toml
+[[rules]]
+name     = "require_approval_db_writes"
+decision = "REQUIRE_APPROVAL"
+reason   = "Production database write — human approval required."
+tools    = ["execute_sql", "*_write", "*_delete"]
+```
+
+When the agent hits this rule the call is blocked and logged as pending. Review and resolve:
+
+```bash
+mcp-aegis pending
+# id        ts                   method        tool/resource                  rule
+# 4a1b2c3d  2026-06-09 14:33:01  tools/call    execute_sql                    require_approval_db_writes
+
+mcp-aegis approve 4a1b2c3d   # marks as approved; agent must retry the call
+mcp-aegis deny 4a1b2c3d      # marks as denied
+```
+
+---
+
 ## CLI reference
 
 ```
-mcp-aegis serve     --upstream URL [--port INT] [--policy PATH] [--db PATH] [--dry-run]
-mcp-aegis logs      [--session ID] [--limit INT] [--tail] [--decision ALLOW|BLOCK|LOG_ONLY]
+mcp-aegis serve     --upstream URL | --upstream-cmd CMD
+                    [--transport http|stdio] [--port INT] [--policy PATH] [--db PATH] [--dry-run]
+mcp-aegis logs      [--session ID] [--limit INT] [--tail] [--decision ALLOW|BLOCK|LOG_ONLY|REQUIRE_APPROVAL]
 mcp-aegis stats     [--db PATH]
+mcp-aegis pending   [--db PATH]
+mcp-aegis approve   ID [--db PATH]
+mcp-aegis deny      ID [--db PATH]
 mcp-aegis policy test TOOL_NAME  [--policy PATH] [--method METHOD]
 mcp-aegis policy show            [--policy PATH]
 ```
 
 ---
 
-## Connecting to AegisTrace
+## Connecting to AegisTrace (v0.2 native integration)
 
-Set `MCP_AEGIS_WEBHOOK_URL` to your AegisTrace ingest endpoint and every BLOCK or LOG_ONLY event is forwarded to your SIEM in real time — full session_id, tool name, decision, and payload preview.
+Set `AEGISTRACE_URL` and `AEGISTRACE_INGEST_KEY` to forward every BLOCK and REQUIRE_APPROVAL event into your AegisTrace AI Action Approval Queue in real time.
 
 ```bash
-export MCP_AEGIS_WEBHOOK_URL=https://your-aegistrace.com/api/ingest/mcp-gateway
+export AEGISTRACE_URL=https://your-aegistrace.com
+export AEGISTRACE_INGEST_KEY=your-ingest-api-key
 mcp-aegis serve --upstream http://localhost:3000
+```
+
+Events appear instantly in AegisTrace at `/app/agent-security` — with session ID, tool name, rule that fired, and payload preview. REQUIRE_APPROVAL events show as `pending` for analyst review.
+
+For generic webhook forwarding (any SIEM):
+
+```bash
+export MCP_AEGIS_WEBHOOK_URL=https://your-siem.com/webhook
 ```
 
 [AegisTrace](https://github.com/Prasanna-27eng/AegisTrace) — the open-source Trust Operating System that makes every AI action auditable and human-approved.
@@ -207,10 +278,11 @@ Transport: HTTP/SSE (stdio support coming in v0.2).
 
 ## Roadmap
 
-**v0.2 (Week 2)**
-- stdio transport (`mcp-aegis serve --transport stdio`)
-- `REQUIRE_APPROVAL` decision — pause and prompt analyst before forwarding
-- AegisTrace native integration — decisions appear in the AI Action Approval Queue
+**v0.2 (shipped)**
+- [x] stdio transport — `--transport stdio` with `--upstream-cmd` subprocess mode (Claude Desktop compatible)
+- [x] `REQUIRE_APPROVAL` decision — blocks call, queues for review; `mcp-aegis pending/approve/deny`
+- [x] AegisTrace native integration — BLOCK/REQUIRE_APPROVAL appear in the AI Action Approval Queue
+- [x] `AEGISTRACE_URL` + `AEGISTRACE_INGEST_KEY` env vars
 
 **v0.3+**
 - Community policy library — `mcp-aegis policy install github-mcp`

@@ -81,8 +81,9 @@ app.add_typer(policy_app, name="policy")
 # ---------------------------------------------------------------------------
 @app.command()
 def serve(
-    upstream: str = typer.Option(..., "--upstream", help="Upstream MCP server URL."),
-    port: int = typer.Option(_DEFAULT_PORT, "--port", help="Port to listen on."),
+    upstream: Optional[str] = typer.Option(None, "--upstream", help="Upstream MCP server URL (HTTP/SSE transport)."),
+    upstream_cmd: Optional[str] = typer.Option(None, "--upstream-cmd", help="Upstream MCP server command (stdio transport subprocess mode)."),
+    port: int = typer.Option(_DEFAULT_PORT, "--port", help="Port to listen on (HTTP transport only)."),
     policy: Optional[Path] = typer.Option(
         None, "--policy", help="Path to policy TOML (default: built-in policy_default.toml)."
     ),
@@ -92,19 +93,62 @@ def serve(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Log all decisions but never block."
     ),
+    transport: str = typer.Option(
+        "http", "--transport", help="Transport mode: 'http' (default) or 'stdio'."
+    ),
 ) -> None:
-    """Start the mcp-aegis security gateway in front of an upstream MCP server."""
-    import uvicorn
+    """Start the mcp-aegis security gateway in front of an upstream MCP server.
 
-    from mcp_aegis.server import create_app
-
+    HTTP mode (default):  mcp-aegis serve --upstream http://localhost:3000
+    Stdio/HTTP upstream:  mcp-aegis serve --transport stdio --upstream http://localhost:3000
+    Stdio/subprocess:     mcp-aegis serve --transport stdio --upstream-cmd "node server.js"
+    """
     resolved_policy = policy or _BUILTIN_POLICY
     resolved_db = db or _DEFAULT_DB
-
-    # Ensure audit DB directory exists
     resolved_db.parent.mkdir(parents=True, exist_ok=True)
-
     dry_label = "yes" if dry_run else "no"
+
+    if transport == "stdio":
+        if not upstream and not upstream_cmd:
+            typer.echo("Error: --upstream or --upstream-cmd required for stdio transport.", err=True)
+            raise typer.Exit(1)
+
+        mode = f"subprocess: {upstream_cmd}" if upstream_cmd else f"HTTP: {upstream}"
+        banner = (
+            f"mcp-aegis {__version__} — stdio transport\n"
+            f"Upstream : {mode}\n"
+            f"Policy   : {resolved_policy} (dry-run: {dry_label})\n"
+            f"Audit DB : {resolved_db}"
+        )
+        print(banner, file=sys.stderr)
+
+        import asyncio
+        if upstream_cmd:
+            from mcp_aegis.stdio_transport import run_stdio_subprocess
+            asyncio.run(run_stdio_subprocess(
+                upstream_cmd=upstream_cmd,
+                policy_path=str(resolved_policy),
+                db_path=str(resolved_db),
+                dry_run=dry_run,
+            ))
+        else:
+            from mcp_aegis.stdio_transport import run_stdio_http
+            asyncio.run(run_stdio_http(
+                upstream_url=upstream,
+                policy_path=str(resolved_policy),
+                db_path=str(resolved_db),
+                dry_run=dry_run,
+            ))
+        return
+
+    # HTTP/SSE server mode
+    if not upstream:
+        typer.echo("Error: --upstream is required for HTTP transport.", err=True)
+        raise typer.Exit(1)
+
+    import uvicorn
+    from mcp_aegis.server import create_app
+
     banner = (
         f"mcp-aegis {__version__} — MCP Security Gateway\n"
         f"Upstream : {upstream}\n"
@@ -312,6 +356,107 @@ def stats(
             print("Top 5 Logged Tools:")
             for item in top_logged[:5]:
                 print(f"  {item['tool']:<30} {item['count']:>6}")
+
+
+# ---------------------------------------------------------------------------
+# pending — list REQUIRE_APPROVAL items awaiting review
+# ---------------------------------------------------------------------------
+@app.command()
+def pending(
+    db: Optional[Path] = typer.Option(
+        None, "--db", help="Path to audit DB (default: ~/.mcp-aegis/audit.db)."
+    ),
+) -> None:
+    """List tool calls that hit a REQUIRE_APPROVAL rule and are awaiting review."""
+    from mcp_aegis.audit import AuditLog
+
+    resolved_db = db or _DEFAULT_DB
+    audit = AuditLog(str(resolved_db))
+    items = audit.list_pending()
+
+    if not items:
+        msg = "No pending approvals."
+        if _RICH:
+            console.print(f"[green]{msg}[/green]")
+        else:
+            print(msg)
+        return
+
+    if _RICH:
+        table = Table(title="Pending Approvals", box=None, pad_edge=False, show_header=True,
+                      header_style="bold magenta")
+        table.add_column("id", style="bold cyan", min_width=10)
+        table.add_column("ts", style="dim", min_width=19)
+        table.add_column("method", min_width=12)
+        table.add_column("tool / resource", min_width=30)
+        table.add_column("rule", min_width=20)
+        table.add_column("reason")
+        for item in items:
+            subject = item.get("tool_name") or item.get("resource_uri") or ""
+            table.add_row(
+                item["approval_id"],
+                str(item["ts"]),
+                item["method"],
+                subject,
+                item["rule_name"],
+                item["reason"],
+            )
+        console.print(table)
+        console.print(f"\nApprove: [bold]mcp-aegis approve <id>[/bold]   Deny: [bold]mcp-aegis deny <id>[/bold]")
+    else:
+        header = f"{'id':<10} {'ts':<20} {'method':<14} {'tool/resource':<32} {'rule':<22} reason"
+        print(header)
+        print("-" * len(header))
+        for item in items:
+            subject = (item.get("tool_name") or item.get("resource_uri") or "")[:30]
+            print(f"{item['approval_id']:<10} {str(item['ts']):<20} {item['method']:<14} "
+                  f"{subject:<32} {item['rule_name']:<22} {item['reason']}")
+        print("\nApprove: mcp-aegis approve <id>    Deny: mcp-aegis deny <id>")
+
+
+# ---------------------------------------------------------------------------
+# approve / deny
+# ---------------------------------------------------------------------------
+@app.command()
+def approve(
+    approval_id: str = typer.Argument(..., help="Approval ID from `mcp-aegis pending`."),
+    db: Optional[Path] = typer.Option(None, "--db", help="Path to audit DB."),
+) -> None:
+    """Mark a pending approval as approved (the agent must retry the call manually)."""
+    from mcp_aegis.audit import AuditLog
+
+    resolved_db = db or _DEFAULT_DB
+    audit = AuditLog(str(resolved_db))
+    ok = audit.resolve_pending(approval_id, approved=True)
+    msg = f"Approved: {approval_id}" if ok else f"Not found or already resolved: {approval_id}"
+    colour = "green" if ok else "red"
+    if _RICH:
+        console.print(f"[{colour}]{msg}[/{colour}]")
+    else:
+        print(msg)
+    if not ok:
+        raise typer.Exit(1)
+
+
+@app.command()
+def deny(
+    approval_id: str = typer.Argument(..., help="Approval ID from `mcp-aegis pending`."),
+    db: Optional[Path] = typer.Option(None, "--db", help="Path to audit DB."),
+) -> None:
+    """Mark a pending approval as denied."""
+    from mcp_aegis.audit import AuditLog
+
+    resolved_db = db or _DEFAULT_DB
+    audit = AuditLog(str(resolved_db))
+    ok = audit.resolve_pending(approval_id, approved=False)
+    msg = f"Denied: {approval_id}" if ok else f"Not found or already resolved: {approval_id}"
+    colour = "yellow" if ok else "red"
+    if _RICH:
+        console.print(f"[{colour}]{msg}[/{colour}]")
+    else:
+        print(msg)
+    if not ok:
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

@@ -15,9 +15,10 @@ from mcp_aegis.types import Decision, MCPRequest, PolicyDecision
 _DEFAULT_TOML = Path(__file__).parent / "policy_default.toml"
 
 _DECISION_MAP: dict[str, Decision] = {
-    "ALLOW":    Decision.ALLOW,
-    "BLOCK":    Decision.BLOCK,
-    "LOG_ONLY": Decision.LOG_ONLY,
+    "ALLOW":            Decision.ALLOW,
+    "BLOCK":            Decision.BLOCK,
+    "LOG_ONLY":         Decision.LOG_ONLY,
+    "REQUIRE_APPROVAL": Decision.REQUIRE_APPROVAL,
 }
 
 _DEFAULT_ALLOW = PolicyDecision(

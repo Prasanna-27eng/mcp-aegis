@@ -49,35 +49,42 @@ class MCPProxy:
         upstream_status: int | None = None
         response_body: dict
 
-        actually_block = decision.decision is Decision.BLOCK and not self._dry_run
+        # REQUIRE_APPROVAL in dry_run mode passes through (same as LOG_ONLY).
+        actually_block = (
+            decision.decision in (Decision.BLOCK, Decision.REQUIRE_APPROVAL)
+            and not self._dry_run
+        )
 
         if actually_block:
+            suffix = " Run `mcp-aegis pending` to review." if decision.decision is Decision.REQUIRE_APPROVAL else ""
             response_body = {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": -32600, "message": decision.reason},
+                "error": {"code": -32600, "message": decision.reason + suffix},
             }
         else:
             upstream_status, response_body = await self._post_upstream(raw_body)
 
         latency_ms = int((time.monotonic() - t0) * 1000)
 
-        self._audit.write(
-            AuditEvent(
-                session_id=session_id,
-                request_id=str(request_id) if request_id is not None else None,
-                method=method,
-                tool_name=request.tool_name,
-                resource_uri=request.resource_uri,
-                decision=decision.decision,
-                rule_name=decision.rule_name,
-                reason=decision.reason,
-                payload_preview=json.dumps(params)[:300],
-                upstream_status=upstream_status,
-                latency_ms=latency_ms,
-                dry_run=self._dry_run,
-            )
+        event = AuditEvent(
+            session_id=session_id,
+            request_id=str(request_id) if request_id is not None else None,
+            method=method,
+            tool_name=request.tool_name,
+            resource_uri=request.resource_uri,
+            decision=decision.decision,
+            rule_name=decision.rule_name,
+            reason=decision.reason,
+            payload_preview=json.dumps(params)[:300],
+            upstream_status=upstream_status,
+            latency_ms=latency_ms,
+            dry_run=self._dry_run,
         )
+        self._audit.write(event)
+
+        if decision.decision is Decision.REQUIRE_APPROVAL and not self._dry_run:
+            self._audit.add_pending(event)
 
         status_code = upstream_status if upstream_status is not None else 200
         return status_code, response_body

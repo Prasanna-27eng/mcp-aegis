@@ -24,6 +24,24 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
 """
 
+_CREATE_PENDING = """
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    approval_id  TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    request_id   TEXT,
+    ts           REAL NOT NULL,
+    method       TEXT NOT NULL,
+    tool_name    TEXT,
+    resource_uri TEXT,
+    payload      TEXT NOT NULL,
+    rule_name    TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    resolved     INTEGER NOT NULL DEFAULT 0,
+    resolution   TEXT,
+    resolved_at  REAL
+)
+"""
+
 _CREATE_EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +142,38 @@ class _WebhookSender:
                 self._buffer.append(body)
 
 
+class _AegisSender:
+    """Forward BLOCK/REQUIRE_APPROVAL events to AegisTrace AgentAction queue."""
+
+    def __init__(self, base_url: str, ingest_key: str) -> None:
+        self._url = base_url.rstrip("/") + "/api/ingest/mcp-event"
+        self._key = ingest_key
+
+    def send(self, event: AuditEvent) -> None:
+        import json
+
+        payload = {k: (v.value if isinstance(v, Decision) else v)
+                   for k, v in asdict(event).items()}
+        body = json.dumps(payload).encode()
+        threading.Thread(target=self._post, args=(body,), daemon=True).start()
+
+    def _post(self, body: bytes) -> None:
+        try:
+            req = Request(
+                self._url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-AegisTrace-Key": self._key,
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=5):
+                pass
+        except (URLError, OSError) as exc:
+            print(f"[mcp-aegis] aegistrace send failed: {exc}", file=sys.stderr)
+
+
 class AuditLog:
     def __init__(self, db_path: str = "~/.mcp-aegis/audit.db") -> None:
         path = os.path.expanduser(db_path)
@@ -135,6 +185,12 @@ class AuditLog:
         webhook_url = os.environ.get("MCP_AEGIS_WEBHOOK_URL")
         self._webhook: _WebhookSender | None = (
             _WebhookSender(webhook_url) if webhook_url else None
+        )
+
+        aegis_url = os.environ.get("AEGISTRACE_URL")
+        aegis_key = os.environ.get("AEGISTRACE_INGEST_KEY", "")
+        self._aegis: _AegisSender | None = (
+            _AegisSender(aegis_url, aegis_key) if aegis_url else None
         )
 
     # ------------------------------------------------------------------
@@ -152,6 +208,7 @@ class AuditLog:
         with self._lock, self._connect() as conn:
             conn.execute(_CREATE_SESSIONS)
             conn.execute(_CREATE_EVENTS)
+            conn.execute(_CREATE_PENDING)
             for idx in _CREATE_INDEXES:
                 conn.execute(idx)
 
@@ -184,6 +241,9 @@ class AuditLog:
 
         if self._webhook and event.decision in (Decision.BLOCK, Decision.LOG_ONLY):
             self._webhook.send(event)
+
+        if self._aegis and event.decision in (Decision.BLOCK, Decision.REQUIRE_APPROVAL):
+            self._aegis.send(event)
 
     def query(
         self,
@@ -276,6 +336,52 @@ class AuditLog:
             rows = conn.execute(
                 "SELECT session_id, started_at, last_seen, agent_hint "
                 "FROM sessions ORDER BY last_seen DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Pending approvals (REQUIRE_APPROVAL decision)
+    # ------------------------------------------------------------------
+
+    def add_pending(self, event: AuditEvent) -> str:
+        import uuid as _uuid
+        approval_id = str(_uuid.uuid4())[:8]
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """INSERT INTO pending_approvals
+                   (approval_id, session_id, request_id, ts, method, tool_name,
+                    resource_uri, payload, rule_name, reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    approval_id,
+                    event.session_id,
+                    event.request_id,
+                    event.ts,
+                    event.method,
+                    event.tool_name,
+                    event.resource_uri,
+                    event.payload_preview,
+                    event.rule_name,
+                    event.reason,
+                ),
+            )
+        return approval_id
+
+    def resolve_pending(self, approval_id: str, approved: bool) -> bool:
+        resolution = "approved" if approved else "denied"
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE pending_approvals SET resolved=1, resolution=?, resolved_at=? "
+                "WHERE approval_id=? AND resolved=0",
+                (resolution, time.time(), approval_id),
+            )
+        return cur.rowcount > 0
+
+    def list_pending(self, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pending_approvals WHERE resolved=0 ORDER BY ts DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
