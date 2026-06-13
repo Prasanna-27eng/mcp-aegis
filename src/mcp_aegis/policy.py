@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,39 @@ def _matches_any(value: str | None, patterns: list[str]) -> bool:
     if value is None:
         return False
     return any(fnmatch.fnmatch(value, p) for p in patterns)
+
+
+# Argument keys that may carry a filesystem path or URI on a tools/call request.
+_PATH_ARG_KEYS = {
+    "path", "file", "filepath", "file_path", "filename",
+    "uri", "url", "command", "cmd", "source", "destination",
+}
+
+
+def _tool_call_resource_candidates(request: MCPRequest) -> list[str]:
+    """
+    Extract path/URI-like argument values from a tools/call request.
+
+    resource_patterns rules are written against resources/read URIs, but a
+    tool like read_file(path="~/.ssh/id_rsa") reaches the same credential
+    material through tools/call arguments. Surface those values so they're
+    checked against resource_patterns too.
+    """
+    if request.method != "tools/call":
+        return []
+    arguments = request.params.get("arguments")
+    if not isinstance(arguments, dict):
+        return []
+
+    candidates: list[str] = []
+    for key, value in arguments.items():
+        if not isinstance(value, str) or key.lower() not in _PATH_ARG_KEYS:
+            continue
+        candidates.append(value)
+        expanded = os.path.expanduser(value)
+        if expanded.startswith("/"):
+            candidates.append("file://" + expanded)
+    return candidates
 
 
 class PolicyEngine:
@@ -110,7 +144,13 @@ class PolicyEngine:
 
         resource_patterns: list[str] | None = rule.get("resource_patterns")
         if resource_patterns is not None:
-            if not _matches_any(request.resource_uri, resource_patterns):
+            matched = _matches_any(request.resource_uri, resource_patterns)
+            if not matched:
+                matched = any(
+                    _matches_any(candidate, resource_patterns)
+                    for candidate in _tool_call_resource_candidates(request)
+                )
+            if not matched:
                 return False
 
         # If we reach here, all present matchers passed.

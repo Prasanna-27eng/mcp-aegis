@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-aegis"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP security gateway — blocks dangerous AI agent tool calls by default"
 readme = "README.md"
 license = { text = "MIT" }

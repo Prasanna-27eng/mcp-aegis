@@ -9,6 +9,7 @@ from typing import Optional
 import typer
 
 from mcp_aegis import __version__
+from mcp_aegis.types import Decision
 
 # ---------------------------------------------------------------------------
 # Rich (optional)
@@ -203,6 +204,13 @@ def logs(
             kwargs["since_ts"] = since_ts
         return audit.query(**kwargs)
 
+    def _row_decision(row) -> str:
+        dec = row.decision
+        return dec.value if isinstance(dec, Decision) else str(dec)
+
+    def _row_subject(row) -> str:
+        return row.tool_name or row.resource_uri or ""
+
     def _print_table(rows: list) -> None:
         if not rows:
             return
@@ -223,16 +231,16 @@ def logs(
             table.add_column("latency_ms", justify="right", min_width=10)
 
             for row in rows:
-                dec = str(getattr(row, "decision", row.get("decision", "")))
+                dec = _row_decision(row)
                 colour = _DECISION_COLOUR.get(dec, "white")
                 table.add_row(
-                    str(getattr(row, "ts", row.get("ts", ""))),
-                    str(getattr(row, "session_id", row.get("session_id", "")))[:8],
-                    str(getattr(row, "method", row.get("method", ""))),
-                    str(getattr(row, "tool", row.get("tool", ""))),
+                    str(row.ts),
+                    str(row.session_id)[:8],
+                    str(row.method),
+                    _row_subject(row),
                     f"[{colour}]{dec}[/{colour}]",
-                    str(getattr(row, "rule", row.get("rule", ""))),
-                    str(getattr(row, "latency_ms", row.get("latency_ms", ""))),
+                    str(row.rule_name),
+                    str(row.latency_ms),
                 )
             console.print(table)
         else:
@@ -240,14 +248,14 @@ def logs(
             print(header)
             print("-" * len(header))
             for row in rows:
-                dec = str(getattr(row, "decision", row.get("decision", "")))
+                dec = _row_decision(row)
                 coloured = _colour_decision(dec)
-                ts = str(getattr(row, "ts", row.get("ts", "")))
-                sid = str(getattr(row, "session_id", row.get("session_id", "")))[:8]
-                method = str(getattr(row, "method", row.get("method", "")))
-                tool = str(getattr(row, "tool", row.get("tool", "")))
-                rule = str(getattr(row, "rule", row.get("rule", "")))
-                lat = str(getattr(row, "latency_ms", row.get("latency_ms", "")))
+                ts = str(row.ts)
+                sid = str(row.session_id)[:8]
+                method = str(row.method)
+                tool = _row_subject(row)
+                rule = str(row.rule_name)
+                lat = str(row.latency_ms)
                 print(f"{ts:<20} {sid:<8} {method:<14} {tool:<22} {coloured:<10} {rule:<22} {lat:>10}")
 
     if not tail:
